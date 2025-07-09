@@ -14,6 +14,8 @@ import server.server.domain.gpt.domain.facade.GptAnswerFacade;
 import server.server.domain.gpt.domain.repository.GptAnswerRepository;
 import server.server.domain.gpt.presentation.dto.request.GPTCompletionChatRequest;
 import server.server.domain.gpt.presentation.dto.response.CompletionChatResponse;
+import server.server.domain.user.domain.User;
+import server.server.domain.user.domain.facade.UserFacade;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -26,6 +28,7 @@ import java.util.stream.Collectors;
 @Slf4j
 public class RestGptService {
     private final OpenAiService openAiService;
+    private final UserFacade userFacade;
     private final GptAnswerRepository gptAnswerRepository;
     private final GptAnswerFacade gptAnswerFacade;
 
@@ -57,11 +60,13 @@ public class RestGptService {
         // 확인용 출력
         conversation.forEach(chatMessage -> log.info("{} : {}", chatMessage.getRole(), chatMessage.getContent()));
 
-        ChatCompletionResult chatCompletion = openAiService.createChatCompletion(ChatCompletionRequest.builder()
-                .model("gpt-3.5-turbo")
-                .messages(conversation)
-                .maxTokens(1000)
-                .build());
+        ChatCompletionResult chatCompletion = openAiService.createChatCompletion(
+                ChatCompletionRequest.builder()
+                        .model("gpt-4.1") // 모델을 gpt-4.1로 변경
+                        .messages(conversation)
+                        .maxTokens(1000)
+                        .build()
+        );
 
         CompletionChatResponse response = CompletionChatResponse.of(chatCompletion);
         log.info("Chat completed: {}", response);
@@ -75,15 +80,18 @@ public class RestGptService {
         return response;
     }
 
-    private GptAnswer saveAnswer(List<String> response, String requestQuestion) {
+    private void saveAnswer(List<String> response, String requestQuestion) {
+
+        User user = userFacade.getCurrentUser();
 
         String answer = response.stream()
                 .filter(Objects::nonNull)
                 .collect(Collectors.joining());
 
-        return gptAnswerRepository.save(GptAnswer.builder()
+        gptAnswerRepository.save(GptAnswer.builder()
                 .question(requestQuestion)
-                .answer(answer).build());
+                .answer(answer)
+                .user(user).build());
     }
 
 }
