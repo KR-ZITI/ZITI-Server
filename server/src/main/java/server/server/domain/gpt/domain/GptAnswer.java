@@ -6,6 +6,7 @@ import lombok.AccessLevel;
 import lombok.Builder;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
+import server.server.domain.user.domain.User;
 import server.server.global.entity.BaseEntity;
 
 @Getter
@@ -13,19 +14,20 @@ import server.server.global.entity.BaseEntity;
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 public class GptAnswer extends BaseEntity {
 
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Integer id;
-
-    @Column(name = "gpt_answer", length = 1500, nullable = false)
+    @Column(name = "gpt_answer", length = 3000, nullable = false)
     private String answer;
 
     @Column(name = "gpt_question", length = 1500, nullable = false)
     private String question;
 
+    @ManyToOne
+    @JoinColumn(name = "user_id", nullable = false)
+    private User user;
+
     @Builder
-    public GptAnswer(String answer, String question) {
+    public GptAnswer(String answer, String question, User user) {
         this.answer = answer;
         this.question = question;
+        this.user = user;
     }
 }
