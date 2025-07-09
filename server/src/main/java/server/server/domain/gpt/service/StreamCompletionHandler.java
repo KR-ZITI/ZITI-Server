@@ -1,115 +1,154 @@
 package server.server.domain.gpt.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.theokanning.openai.completion.chat.ChatCompletionRequest;
-import com.theokanning.openai.completion.chat.ChatMessage;
-import com.theokanning.openai.service.OpenAiService;
-
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.domain.Sort;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
-import org.springframework.web.socket.CloseStatus;
-import org.springframework.web.socket.TextMessage;
-import org.springframework.web.socket.WebSocketSession;
+import org.springframework.web.client.RestClient;
+import org.springframework.web.socket.*;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 import server.server.domain.gpt.domain.GptAnswer;
 import server.server.domain.gpt.domain.facade.GptAnswerFacade;
 import server.server.domain.gpt.domain.repository.GptAnswerRepository;
-import server.server.domain.gpt.presentation.dto.request.GPTCompletionChatRequest;
+import server.server.domain.gpt.presentation.dto.request.GPTChatWithImageRequest;
+
+import jakarta.annotation.PostConstruct;
+import server.server.domain.user.domain.User;
+import server.server.domain.user.domain.facade.UserFacade;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.util.*;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class StreamCompletionHandler extends TextWebSocketHandler {
+
     private final HashMap<String, WebSocketSession> sessionHashMap = new HashMap<>();
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private final OpenAiService openAiService;
     private final GptAnswerRepository gptAnswerRepository;
-    private final GptAnswerFacade gptAnswerFacade;
+    private final UserFacade userFacade;
 
-    private final StringBuilder responseBuffer = new StringBuilder();
+    @Value("${openai.api.key}")
+    private String apiKey;
 
-    List<ChatMessage> conversation = new ArrayList<>();
+    private static final String OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
+    private RestClient restClient;
 
-    /* Client가 접속 시 호출되는 메서드 */
+    @PostConstruct
+    private void initRestClient() {
+        this.restClient = RestClient.builder()
+                .baseUrl(OPENAI_API_URL)
+                .defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + apiKey)
+                .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+                .build();
+    }
+
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
-
         sessionHashMap.put(session.getId(), session);
-        log.info("현재 접근한 유저 : {}", session.getId());
+        log.info("접속된 세션: {}", session.getId());
     }
 
-    /* Client가 접속 해제 시 호출되는 메서드드 */
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
-
         sessionHashMap.remove(session.getId());
-        log.info("연결해제 한 유저 : {}", session.getId());
+        log.info("해제된 세션: {}", session.getId());
     }
 
-    /* Client로부터 텍스트 메시지를 수신했을 때 호출되는 메서드 */
     @Override
     public void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
+        // 👇 여기서 email 추출
+        String email = (String) session.getAttributes().get("email");
+        if (email == null) {
+            log.warn("세션에 email 없음. 인증되지 않은 요청.");
+            return;
+        }
 
-        // 메시지 payload를 GPTCompletionChatRequest 객체로 변환
-        GPTCompletionChatRequest gptCompletionChatRequest = objectMapper.readValue(message.getPayload(),
-                GPTCompletionChatRequest.class);
+        User user = userFacade.getUserByEmail(email); // 🔐 인증된 사용자 획득
 
-        // StringBuilder responseBuffer 초기화
-        responseBuffer.setLength(0);
-
-        // 메시지 전송을 위한 채팅 메시지 리스트 초기화
-        conversation.clear();
-
-        // streamCompletion 메서드 호출
-        sessionHashMap.keySet().forEach(key -> {
-            streamCompletion(key, gptCompletionChatRequest);
-        });
+        GPTChatWithImageRequest request = objectMapper.readValue(message.getPayload(), GPTChatWithImageRequest.class);
+        streamCompletionWithImage(session.getId(), request, user); // 👇 user 넘겨줌
     }
 
-    /* GPT 스트림 응답을 처리하는 메서드 */
-    private void streamCompletion(String key, GPTCompletionChatRequest gptCompletionChatRequest) {
 
-        ChatMessage systemMsg = gptCompletionChatRequest.promptStart();
-        conversation.add(systemMsg);
+    private void streamCompletionWithImage(String key, GPTChatWithImageRequest request, User user) {
+        try {
+            Map<String, Object> userMessage;
 
-        Sort sort = Sort.by(Sort.Direction.DESC, "id");
-        List<GptAnswer> gptAnswers = gptAnswerFacade.getGptAnswerAllById(sort);
+            if (request.getImageBase64() != null && !request.getImageBase64().isBlank()) {
+                File imageFile = saveImageFromBase64(request.getImageBase64(), UUID.randomUUID() + ".png");
+                String base64Image = Base64.getEncoder().encodeToString(java.nio.file.Files.readAllBytes(imageFile.toPath()));
+                String mimeType = java.nio.file.Files.probeContentType(imageFile.toPath());
+                imageFile.delete();
 
-        gptAnswers.forEach(gptAnswer -> {
-            conversation.add(new ChatMessage("user", gptAnswer.getQuestion()));
-            conversation.add(new ChatMessage("assistant", gptAnswer.getAnswer()));
-        });
+                userMessage = Map.of(
+                        "role", "user",
+                        "content", List.of(
+                                Map.of("type", "text", "text", request.getMessage()),
+                                Map.of("type", "image_url", "image_url", Map.of(
+                                        "url", "data:" + mimeType + ";base64," + base64Image
+                                ))
+                        )
+                );
+            } else {
+                userMessage = Map.of(
+                        "role", "user",
+                        "content", List.of(
+                                Map.of("type", "text", "text", request.getMessage())
+                        )
+                );
+            }
 
-        // 확인용 출력
-        conversation.forEach(chatMessage -> log.info("{} : {}", chatMessage.getRole(), chatMessage.getContent()));
+            Map<String, Object> body = Map.of(
+                    "model", "gpt-4.1",
+                    "messages", List.of(
+                            Map.of("role", "system", "content", "너의 언어는 한국어이고 친구처럼 말해줘."),
+                            userMessage
+                    ),
+                    "max_tokens", 1000
+            );
 
-        ChatMessage userMsg = gptCompletionChatRequest.convertChatMessage();
-        conversation.add(userMsg);
+            Map<?, ?> response = restClient.post()
+                    .body(body)
+                    .retrieve()
+                    .body(Map.class);
 
-        openAiService.streamChatCompletion(ChatCompletionRequest.builder()
-                        .model("gpt-3.5-turbo")
-                        .messages(conversation)
-                        .maxTokens(1000)
-                        .stream(true)
-                        .build())
-                .blockingForEach(response -> {
-                    String responseSegment = response.getChoices().get(0).getMessage().getContent();
-                    if (responseSegment != null) {
-                        responseBuffer.append(responseSegment); // 응답 부분을 StringBuilder에 추가
-                        sessionHashMap.get(key).sendMessage(new TextMessage(responseSegment)); // 세션에 응답 부분 전송
-                    }
-                });
-        String fullResponse = responseBuffer.toString(); // 전체 응답을 문자열로 변환
+            String reply = Optional.ofNullable(response)
+                    .map(res -> (List<Map<String, Object>>) res.get("choices"))
+                    .map(choices -> choices.get(0))
+                    .map(choice -> (Map<String, Object>) choice.get("message"))
+                    .map(msg -> (String) msg.get("content"))
+                    .orElse("GPT 응답 없음");
 
-        // GPT 답변을 저장
-        gptAnswerRepository.save(GptAnswer.builder()
-                .question(gptCompletionChatRequest.getMessage())
-                .answer(fullResponse).build());
+            if (sessionHashMap.get(key) != null && sessionHashMap.get(key).isOpen()) {
+                sessionHashMap.get(key).sendMessage(new TextMessage(reply));
+            }
+
+            gptAnswerRepository.save(GptAnswer.builder()
+                    .question(request.getMessage())
+                    .answer(reply)
+                    .user(user)
+                    .build());
+
+        } catch (Exception e) {
+            log.error("이미지 기반 GPT 처리 오류", e);
+        }
+    }
+
+    private File saveImageFromBase64(String base64, String filename) throws IOException {
+        String base64Data = base64.contains(",") ? base64.split(",")[1] : base64;
+        byte[] decoded = Base64.getDecoder().decode(base64Data);
+        File file = new File("uploads/" + filename);
+        try (FileOutputStream fos = new FileOutputStream(file)) {
+            fos.write(decoded);
+        }
+        return file;
     }
 }
